@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Casper Excalibur Control
+Comment=Keyboard color, fan monitor and power settings for the Casper Excalibur G900
+Exec=/usr/local/bin/casper-gui
+Icon=preferences-system
+Terminal=false
+Categories=System;Settings;HardwareSettings;
