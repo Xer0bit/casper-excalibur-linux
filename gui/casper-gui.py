@@ -7,12 +7,31 @@ one casper-ctl command per line. Each reply ends with a line "@@DONE <rc>".
 """
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
 import threading
 
 DONE = "@@DONE"
+FAN_RE = re.compile(r"fan1=(\d+)rpm fan2=(\d+)rpm temp=(\d+)C")
+SWATCHES = (("Red", "FF0000"), ("Orange", "FF8000"), ("Yellow", "FFE000"), ("Green", "00FF00"),
+            ("Cyan", "00FFFF"), ("Blue", "0000FF"), ("Purple", "8000FF"), ("Pink", "FF2D95"), ("White", "FFFFFF"))
+CSS = b"""
+.card { background: alpha(@theme_fg_color, 0.06); border-radius: 12px; padding: 12px 16px; }
+.card-title { opacity: 0.65; font-size: 9pt; }
+.card-value { font-size: 20pt; font-weight: 700; }
+.section { font-weight: 700; margin-top: 4px; }
+.swatch { min-width: 44px; min-height: 44px; border-radius: 22px; border: 2px solid alpha(@theme_fg_color, 0.25);
+          background-image: none; padding: 0; }
+.swatch:hover { border-color: @theme_fg_color; }
+levelbar trough { min-height: 8px; }
+levelbar block { min-height: 8px; border-radius: 4px; }
+levelbar.hot block.filled { background-image: none; background-color: #e5484d; }
+levelbar.warm block.filled { background-image: none; background-color: #f5a524; }
+levelbar.cool block.filled { background-image: none; background-color: #30a46c; }
+.log { font-size: 9pt; }
+"""
 
 
 class Helper:
@@ -98,16 +117,33 @@ def main(argv):
     class App(Gtk.Window):
         def __init__(self):
             super().__init__(title="Casper Excalibur G900")
-            self.set_default_size(620, 640)
+            self.set_default_size(700, 780)
+            self.set_icon_name("casper-gui")
             self.helper = Helper(helper_argv)
             self.connect("destroy", self.on_destroy)
 
-            outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-            outer.set_border_width(10)
+            css = Gtk.CssProvider()
+            css.load_from_data(CSS + "".join(".sw-%s { background-color: #%s; }\n" % (hx, hx) for _, hx in SWATCHES).encode())
+            Gtk.StyleContext.add_provider_for_screen(
+                Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+            hb = Gtk.HeaderBar(show_close_button=True, title="Casper Excalibur G900", subtitle="Linux control")
+            self.set_titlebar(hb)
+
+            outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+            outer.set_border_width(14)
             self.add(outer)
 
+            dash = Gtk.Box(spacing=10, homogeneous=True)
+            self.fan1 = self.card(dash, "FAN 1", 6500)
+            self.fan2 = self.card(dash, "FAN 2", 6500)
+            self.temp = self.card(dash, "TEMPERATURE", 100)
+            outer.pack_start(dash, False, False, 0)
+
             self.status = Gtk.Label(label="reading status...", xalign=0)
-            self.status.set_selectable(True)
+            self.status.set_line_wrap(True)
+            self.status.set_no_show_all(True)   # shown only while there is a message
+            self.status.get_style_context().add_class("card-title")
             outer.pack_start(self.status, False, False, 0)
 
             nb = Gtk.Notebook()
@@ -119,13 +155,48 @@ def main(argv):
 
             self.log = Gtk.TextView(editable=False, monospace=True)
             self.log.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+            self.log.get_style_context().add_class("log")
             sw = Gtk.ScrolledWindow()
-            sw.set_min_content_height(150)
+            sw.set_min_content_height(130)
             sw.add(self.log)
-            outer.pack_start(sw, False, False, 0)
+            expander = Gtk.Expander(label="Log", expanded=True)
+            expander.add(sw)
+            outer.pack_start(expander, False, False, 0)
 
             GLib.timeout_add_seconds(2, self.poll)
             self.poll()
+
+        @staticmethod
+        def card(parent, title, top):
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            box.get_style_context().add_class("card")
+            head = Gtk.Label(label=title, xalign=0)
+            head.get_style_context().add_class("card-title")
+            value = Gtk.Label(label="--", xalign=0)
+            value.get_style_context().add_class("card-value")
+            bar = Gtk.LevelBar()
+            bar.set_min_value(0)
+            bar.set_max_value(top)
+            for w in (head, value, bar):
+                box.pack_start(w, False, False, 0)
+            parent.pack_start(box, True, True, 0)
+            return value, bar, top
+
+        def show_status(self, rc, out):
+            m = FAN_RE.search(out) if rc == 0 else None
+            if not m:
+                self.status.set_text(("fan status unavailable: " if rc else "unexpected status: ") + out)
+                self.status.set_visible(True)
+                return
+            for (label, bar, top), val, unit in zip((self.fan1, self.fan2, self.temp),
+                                                    map(int, m.groups()), (" RPM", " RPM", " °C")):
+                label.set_text("%d%s" % (val, unit))
+                bar.set_value(min(val, top))
+                ctx = bar.get_style_context()
+                for c in ("cool", "warm", "hot"):
+                    ctx.remove_class(c)
+                ctx.add_class("hot" if val / top > 0.85 else "warm" if val / top > 0.6 else "cool")
+            self.status.set_visible(False)
 
         # ---- plumbing ----
         def on_destroy(self, *_):
@@ -145,10 +216,11 @@ def main(argv):
         def poll(self):
             if not self.helper.alive:
                 self.status.set_text("helper not running (authentication cancelled or casper-ctl missing)")
+                self.status.set_visible(True)
                 return False
             if self.helper.idle():
                 def done(rc, out):
-                    GLib.idle_add(self.status.set_text, out if rc == 0 else "fan status unavailable: " + out)
+                    GLib.idle_add(self.show_status, rc, out)
                 self.helper.run("fan-status", done)
             return True
 
@@ -190,10 +262,14 @@ def main(argv):
                 return "%02X%02X%02X" % (round(c.red * 255), round(c.green * 255), round(c.blue * 255))
             p.pack_start(self.row("Color", color, self.button("Apply", lambda: "kbd-color " + hexcolor())), False, False, 0)
 
-            quick = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            for name, hx in (("Red", "FF0000"), ("Green", "00FF00"), ("Blue", "0000FF"),
-                             ("White", "FFFFFF"), ("Purple", "8000FF"), ("Cyan", "00FFFF")):
-                quick.pack_start(self.button(name, lambda hx=hx: "kbd-color " + hx), False, False, 0)
+            quick = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            for name, hx in SWATCHES:
+                b = self.button("", lambda hx=hx: "kbd-color " + hx)
+                b.set_tooltip_text(name)
+                b.get_accessible().set_name(name)
+                b.get_style_context().add_class("swatch")
+                b.get_style_context().add_class("sw-" + hx)
+                quick.pack_start(b, False, False, 0)
             p.pack_start(self.row("Quick colors", quick), False, False, 0)
 
             level = Gtk.ComboBoxText()

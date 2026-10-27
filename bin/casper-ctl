@@ -398,8 +398,9 @@ preset() {
   if [ "$FAILED" -gt 0 ]; then msg "preset $1 applied with $FAILED step(s) skipped"; else msg "preset $1 applied"; fi
 }
 install_service() {
-  local p="${1:-none}"
-  [ "$SELF" = /usr/local/bin/casper-ctl ] || install -m755 "$SELF" /usr/local/bin/casper-ctl
+  local p="${1:-none}" bin=/usr/local/bin/casper-ctl
+  if [ "$SELF" = /usr/bin/casper-ctl ]; then bin="$SELF"   # installed from the .deb
+  elif [ "$SELF" != "$bin" ]; then install -m755 "$SELF" "$bin"; fi
   cat > /etc/systemd/system/casper-ctl.service <<EOF
 [Unit]
 Description=casper-ctl: apply saved keyboard state (and preset) at boot
@@ -408,7 +409,7 @@ After=multi-user.target systemd-modules-load.service
 [Service]
 Type=oneshot
 Environment=CASPER_CONF_DIR=$CONF_DIR
-ExecStart=/usr/local/bin/casper-ctl boot $p
+ExecStart=$bin boot $p
 
 [Install]
 WantedBy=multi-user.target
@@ -421,7 +422,7 @@ After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate
 [Service]
 Type=oneshot
 Environment=CASPER_CONF_DIR=$CONF_DIR
-ExecStart=/usr/local/bin/casper-ctl boot $p
+ExecStart=$bin boot $p
 
 [Install]
 WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target

@@ -18,6 +18,8 @@ fi
 install -m755 "$here/bin/casper-ctl" /usr/local/bin/casper-ctl
 install -m755 "$here/gui/casper-gui.py" /usr/local/bin/casper-gui
 install -m644 "$here/data/casper-gui.desktop" /usr/share/applications/casper-gui.desktop
+install -Dm644 "$here/data/casper-gui.svg" /usr/share/icons/hicolor/scalable/apps/casper-gui.svg
+command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t /usr/share/icons/hicolor || true
 mkdir -p /etc/casper-ctl/state
 
 # Migrate a previous per-user state (saved keyboard color etc.) if present.

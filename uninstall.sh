@@ -5,6 +5,6 @@ set -uo pipefail
 systemctl disable --now casper-ctl.service casper-ctl-resume.service 2>/dev/null
 rm -f /etc/systemd/system/casper-ctl.service /etc/systemd/system/casper-ctl-resume.service
 systemctl daemon-reload
-rm -f /usr/local/bin/casper-ctl /usr/local/bin/casper-gui /usr/share/applications/casper-gui.desktop
+rm -f /usr/local/bin/casper-ctl /usr/local/bin/casper-gui /usr/share/applications/casper-gui.desktop /usr/share/icons/hicolor/scalable/apps/casper-gui.svg
 [ "${1:-}" = --purge ] && rm -rf /etc/casper-ctl
 echo "removed"
