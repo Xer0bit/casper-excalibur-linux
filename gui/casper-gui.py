@@ -88,6 +88,7 @@ def default_helper_argv():
 def main(argv):
     import gi
     gi.require_version("Gtk", "3.0")
+    gi.require_version("Gdk", "3.0")
     from gi.repository import Gdk, GLib, Gtk
 
     helper_argv = default_helper_argv()
@@ -134,8 +135,7 @@ def main(argv):
         def say(self, text):
             buf = self.log.get_buffer()
             buf.insert(buf.get_end_iter(), text + "\n")
-            mark = buf.create_mark(None, buf.get_end_iter(), False)
-            self.log.scroll_mark_onscreen(mark)
+            self.log.scroll_to_iter(buf.get_end_iter(), 0.0, False, 0.0, 0.0)
 
         def cmd(self, command):
             def done(rc, out):
