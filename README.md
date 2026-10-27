@@ -1,108 +1,88 @@
 # casper-excalibur-linux
 
-**English** | [Türkçe](README.tr.md)
+**Türkçe** | [English](README.en.md)
 
-Linux control for the **Casper Excalibur G900** (board `NLCB 001`, Insyde BIOS, i7-10750H, RTX 2060 Mobile).
-Casper only ships Windows software for keyboard lighting and fan/performance settings. This project talks to the
-same embedded controller (EC) and kernel interfaces from Linux:
+**Casper Excalibur G900** (kart `NLCB 001`, Insyde BIOS, i7-10750H, RTX 2060 Mobile) için Linux desteği.
+Casper klavye aydınlatması ile fan ve performans ayarları için yalnızca Windows yazılımı sunar. Bu proje aynı gömülü
+denetleyiciyle (EC) ve çekirdek arayüzleriyle Linux üzerinden konuşur:
 
-- `casper-ctl`: a single bash CLI (`bin/casper-ctl`)
-- `casper-gui`: a small GTK3 front end that uses the CLI through one authenticated helper
+- `casper-ctl`: tek dosyalık bash komut satırı aracı
+- `casper-gui`: GTK3 arayüzü (tek seferlik parola isteği)
 
-The EC register map was reverse-engineered from this laptop's own ACPI DSDT. Nothing here is endorsed by Casper.
+EC kayıt haritası, bu dizüstünün kendi ACPI DSDT tablosundan çıkarıldı. Proje Casper tarafından onaylanmış değildir.
 
-## Status
+**Anahtar kelimeler:** Casper Excalibur G900 Linux, Casper Linux sürücü, Casper klavye RGB ışık rengi Linux,
+Casper fan hızı Linux, Casper oyuncu dizüstü Ubuntu, NLCB 001, Insyde BIOS, EC (gömülü denetleyici), ACPI DSDT,
+klavye aydınlatma, fan devri (RPM), sıcaklık izleme, CPU güç sınırı (PL1/PL2), turbo, RTX 2060 saat kilidi,
+Ubuntu, Debian, GTK3, bash.
 
-| Feature | State |
+## Durum
+
+| Özellik | Durum |
 |---|---|
-| Keyboard color (`kbd-color`) | Works on hardware (the firmware's own EC handshake) |
-| Keyboard level / mode / effect | Commands run and are acknowledged by the EC; what each value does is not mapped yet |
-| Keep keyboard state across boot and resume | Implemented (`install-service`); not yet confirmed on hardware |
-| Fan RPM, temperature | Works on hardware (`fan-status`) |
-| Fan speed control | **Not available.** The DSDT has no fan-speed write; `FANE`/`FAND` effect unclear (see `docs/EC-MAP.md`) |
-| CPU power limits, turbo, EPP, governor, presets | Implemented through standard sysfs; not yet confirmed on hardware |
-| GPU clock lock / power limit | Implemented through `nvidia-smi`; the power limit is `N/A` on this vBIOS |
-| GTK GUI | Implemented; compile-checked and its helper protocol tested, but not yet run on a display |
-| Offline test suite | `tests/run.sh` (fake EC image, no hardware needed) |
+| Klavye rengi (`kbd-color`) | Donanımda çalışıyor |
+| Klavye seviye / mod / efekt | Komutlar çalışıyor; değerlerin anlamı henüz çıkarılmadı |
+| Açılış ve uykudan dönüşte klavye durumunu koruma | Uygulandı (`install-service`) |
+| Fan devri (RPM) ve sıcaklık | Donanımda çalışıyor |
+| Fan hızı ayarı | **Yok.** Bu kartın EC fan arayüzü çözülmedi, yalnızca izleme var |
+| CPU güç sınırları, turbo, EPP, governor, hazır profiller | Standart sysfs üzerinden |
+| GPU saat kilidi / güç sınırı | `nvidia-smi` ile; bu vBIOS güç sınırını `N/A` bildirir |
+| GTK arayüzü | Çalışıyor |
+| Çevrimdışı test paketi | `tests/run.sh` (sahte EC imajı, donanım gerekmez) |
 
-## Install
+## Kurulum (Ubuntu)
 
 ```
-git clone https://github.com/Xer0bit/casper-excalibur-linux.git casper-excalibur-linux
+git clone https://github.com/Xer0bit/casper-excalibur-linux.git
 cd casper-excalibur-linux
 sudo ./install.sh
 ```
 
-The installer puts `casper-ctl` and `casper-gui` in `/usr/local/bin`, creates `/etc/casper-ctl`, and decodes the EC
-field map from your DSDT (`sudo casper-ctl ec-fields`; needs `acpica-tools`, installed automatically on apt systems).
+Eksik sürücü ve paketleri bulmak ve kurmak için:
 
-Step-by-step guide, requirements and troubleshooting: [docs/INSTALL.md](docs/INSTALL.md).
-Check for missing drivers any time: `sudo casper-ctl doctor` (`--fix` installs them).
+```
+sudo casper-ctl doctor          # yalnızca rapor verir
+sudo casper-ctl doctor --fix    # eksikleri kurar, sonra tekrar kontrol eder
+```
 
-Keep the keyboard color across reboots and suspend:
+`doctor` şunlara bakar: kart modeli, `ec_sys`, Secure Boot kilidi, `acpica-tools`, GTK3, `pkexec`, NVIDIA sürücüsü,
+`intel_pstate` ve RAPL. NVIDIA sürücüsünü yeniden başlatma gerektirdiği için kurmadan önce sorar.
+
+Ayrıntılı rehber: [docs/INSTALL.md](docs/INSTALL.md) ([English](docs/INSTALL.en.md)).
+
+Klavye rengini yeniden başlatma ve uykudan sonra korumak için:
 
 ```
 sudo casper-ctl kbd-color 00FF00
-sudo casper-ctl install-service none     # 'none' = restore keyboard only; or quiet|balanced|performance|max
+sudo casper-ctl install-service none
 ```
 
-Uninstall: `sudo ./uninstall.sh` (`--purge` also removes `/etc/casper-ctl`).
+Kaldırma: `sudo ./uninstall.sh` (`--purge` ayarları da siler).
 
-## CLI
+## Kullanım
 
 ```
-sudo casper-ctl status                    # everything readable
-sudo casper-ctl kbd-color FF8040
-sudo casper-ctl kbd-level 2 | kbd-mode 5 | kbd-effect 3     # raw EC values
-sudo casper-ctl fan-status [watch]        # both fan RPMs, temperature
+sudo casper-ctl status                    # okunabilen tüm durum
+sudo casper-ctl kbd-color FF8040          # klavye rengi (RRGGBB)
+sudo casper-ctl fan-status [watch]        # iki fan devri ve sıcaklık
 sudo casper-ctl preset balanced           # quiet | balanced | performance | max
-sudo casper-ctl rapl 45 65                # CPU PL1 / PL2 in watts
-sudo casper-ctl turbo off | cpu-epp power | cpu-gov powersave
-sudo casper-ctl gpu-lock 300 1500 | gpu-unlock
-sudo casper-ctl help                      # all commands
+sudo casper-ctl rapl 45 65                # CPU PL1 / PL2 (watt)
+sudo casper-ctl gpu-lock 300 1500         # GPU saat kilidi (MHz)
+casper-gui                                # grafik arayüz
 ```
 
-Environment: `DRY=1` prints writes instead of doing them; `FORCE=1` lifts the CPU/fan safety limits.
+## Güvenlik
 
-## GUI
+- EC yazma işlemleri yalnızca kart adı `NLCB 001` ise açıktır. Diğer modellerde EC haritası farklıdır.
+- Yazılan her EC baytı kaydedilir; `sudo casper-ctl ec-undo` geri alır.
+- Sınırlar: PL1 120 W, PL2 135 W üstü ve %30 altı fan hızı, `FORCE=1` olmadan reddedilir.
+- Secure Boot açıksa çekirdek kilidi EC yazmasını engelleyebilir; BIOS'tan kapatın.
 
-```
-casper-gui
-```
+## Katkı
 
-Asks for your password once (polkit). Tabs: Keyboard, Fans (monitor), CPU / Power, GPU. A log pane shows each command
-and its output.
+Başka bir Casper veya Tongfang tabanlı modelin doğrulanmış EC haritasını içeren pull request'ler memnuniyetle
+karşılanır. Yöntem için [docs/EC-MAP.md](docs/EC-MAP.md) dosyasına bakın.
 
-## Safety
+## Lisans
 
-- EC writes are refused unless the DMI board name is `NLCB 001`. EC maps differ between models. Override with
-  `CASPER_SKIP_BOARD_CHECK=1` only if you know what you are doing.
-- EC writes go through named DSDT fields with read-modify-write, so neighbouring bits in a byte are preserved.
-- Every EC byte written is logged; `sudo casper-ctl ec-undo` restores them.
-- The keyboard handshake includes the EC's own save step. Do not call it in a tight loop.
-- Limits: CPU PL1 above 120 W, PL2 above 135 W, and fan duty below 30% are refused unless `FORCE=1`.
-
-## How it works
-
-- `casper-ctl discover` decodes WMI GUIDs and the EC `OperationRegion` from the DSDT.
-- `casper-ctl ec-fields` lists every EC field name with its byte and bit offset.
-- `ec-snap` / `ec-diff` find which bytes change when you press an Fn key or change a setting in Windows.
-- The keyboard color protocol is copied from the DSDT method `\_SB.GWMI.WSAA` (function `0xFB00`/`0x0100`).
-
-Details, field table and open questions: [docs/EC-MAP.md](docs/EC-MAP.md).
-
-## Other Casper or Tongfang-style laptops
-
-Run `sudo casper-ctl discover` and `sudo casper-ctl ec-fields`, compare with `docs/EC-MAP.md`, and use
-`ec-snap`/`ec-diff` while changing one setting at a time. Reads work on any board. Sending a pull request with a
-verified map for another board is welcome.
-
-## Tests
-
-```
-./tests/run.sh
-```
-
-## License
-
-MIT. See [LICENSE](LICENSE).
+MIT. Bkz. [LICENSE](LICENSE).
