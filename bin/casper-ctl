@@ -1,0 +1,567 @@
+#!/usr/bin/env bash
+# casper-ctl: hardware control for Casper Excalibur G900 (board NLCB 001, INSYDE BIOS) on Linux.
+# Interfaces: cpufreq/intel_pstate, RAPL powercap, nvidia-smi, hwmon, platform_profile, LED class,
+# and the embedded controller (ec_sys) addressed by field names decoded from this machine's DSDT.
+# Config/state: /etc/casper-ctl when it exists (installed), else ~/.config/casper-ctl.
+set -uo pipefail
+
+SELF="$(readlink -f "$0")"
+REAL_USER="${SUDO_USER:-${USER:-root}}"
+REAL_HOME="$(getent passwd "$REAL_USER" | cut -d: -f6)"
+if [ -n "${CASPER_CONF_DIR:-}" ]; then CONF_DIR="$CASPER_CONF_DIR"
+elif [ -d /etc/casper-ctl ]; then CONF_DIR=/etc/casper-ctl
+else CONF_DIR="$REAL_HOME/.config/casper-ctl"; fi
+CONF="$CONF_DIR/ec.conf"
+STATE="$CONF_DIR/state"
+FIELDS="$CONF_DIR/ec_fields.txt"
+ACPI_DIR="$CONF_DIR/acpi"
+EC_IO="${EC_IO:-/sys/kernel/debug/ec/ec0/io}"
+CPUF=/sys/devices/system/cpu
+RAPL=/sys/class/powercap/intel-rapl:0
+DRY="${DRY:-0}"
+FORCE="${FORCE:-0}"
+
+msg()  { printf '%s\n' "$*"; }
+warn() { printf 'WARN: %s\n' "$*" >&2; }
+die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+isnum(){ [[ "${1:-}" =~ ^[0-9]+$ ]]; }
+run()  { if [ "$DRY" = 1 ]; then msg "DRY: $*"; else "$@"; fi; }
+try()  { ( "$@" ) || warn "step failed: $*"; }
+
+setf() {
+  local f="$1" v="$2"
+  [ -w "$f" ] || { warn "not writable: $f"; return 1; }
+  if [ "$DRY" = 1 ]; then msg "DRY: $f <- $v"; return 0; fi
+  printf '%s' "$v" > "$f" 2>/dev/null || { warn "write failed: $f <- $v"; return 1; }
+}
+
+# ---------- config ----------
+EC_FAN_MODE_OFF=""; EC_FAN_MODE_AUTO=""; EC_FAN_MODE_MANUAL=""
+EC_FAN_DUTY_OFFS=""; EC_FAN_DUTY_MAX=255
+EC_KBD_BRIGHT_OFF=""; EC_KBD_BRIGHT_MAX=255
+EC_KBD_R_OFF=""; EC_KBD_G_OFF=""; EC_KBD_B_OFF=""; EC_KBD_COLOR_MAX=255
+mkdir -p "$STATE" 2>/dev/null
+# shellcheck disable=SC1090
+[ -f "$CONF" ] && . "$CONF"
+
+init_conf() {
+  [ -f "$CONF" ] && { msg "exists: $CONF"; return; }
+  cat > "$CONF" <<'EOF'
+# EC map for casper-ctl. Fill with offsets found via: discover, ec-fields, ec-snap/ec-diff.
+# Offsets are decimal or 0xNN. Leave empty to disable.
+EC_FAN_MODE_OFF=""        # register switching fan auto/manual
+EC_FAN_MODE_AUTO=""       # value = auto
+EC_FAN_MODE_MANUAL=""     # value = manual
+EC_FAN_DUTY_OFFS=""       # space separated duty registers, one per fan: "0x58 0x59"
+EC_FAN_DUTY_MAX=255       # value corresponding to 100%
+EC_KBD_BRIGHT_OFF=""
+EC_KBD_BRIGHT_MAX=255
+EC_KBD_R_OFF=""
+EC_KBD_G_OFF=""
+EC_KBD_B_OFF=""
+EC_KBD_COLOR_MAX=255
+EOF
+  msg "created: $CONF"
+}
+
+# ---------- EC access ----------
+ec_ready() {
+  [ -r "$EC_IO" ] && return 0
+  have modprobe && modprobe ec_sys write_support=1 2>/dev/null
+  [ -r "$EC_IO" ] || { mountpoint -q /sys/kernel/debug || mount -t debugfs none /sys/kernel/debug 2>/dev/null; }
+  [ -r "$EC_IO" ] || die "EC interface unavailable (ec_sys/debugfs). Check: modinfo ec_sys; kernel may lack CONFIG_ACPI_EC_DEBUGFS"
+}
+board_ok() {
+  [ "${CASPER_SKIP_BOARD_CHECK:-0}" = 1 ] && return 0
+  [ "$(cat /sys/class/dmi/id/board_name 2>/dev/null)" = "NLCB 001" ]
+}
+ec_ready_rw() {
+  board_ok || die "EC writes are enabled only for board 'NLCB 001' (Casper Excalibur G900); this is '$(cat /sys/class/dmi/id/board_name 2>/dev/null)'. EC maps differ per model. Override: CASPER_SKIP_BOARD_CHECK=1 (at your own risk)."
+  ec_ready
+  case "$EC_IO" in /sys/*) ;; *) return 0;; esac   # non-sysfs path: test hook
+  if [ "$(cat /sys/module/ec_sys/parameters/write_support 2>/dev/null)" != "Y" ]; then
+    modprobe -r ec_sys 2>/dev/null; modprobe ec_sys write_support=1 2>/dev/null
+  fi
+  [ "$(cat /sys/module/ec_sys/parameters/write_support 2>/dev/null)" = "Y" ] || die "ec_sys write_support not enabled"
+}
+ec_read() { dd if="$EC_IO" bs=1 skip=$(($1)) count=1 2>/dev/null | od -An -tu1 | tr -d ' '; }
+ec_write_raw() {
+  [ "$DRY" = 1 ] && { msg "DRY: EC[$1] <- $2"; return 0; }
+  printf "$(printf '\\x%02x' $(($2)))" | dd of="$EC_IO" bs=1 seek=$(($1)) count=1 conv=notrunc 2>/dev/null
+}
+ec_set() { # off val  (logs previous value for ec-undo)
+  ec_ready_rw
+  local old; old="$(ec_read "$1")"
+  echo "$(( $1 )) $old" >> "$STATE/ec_undo.log"
+  ec_write_raw "$1" "$2"
+  msg "EC[$(printf '0x%02X' $(( $1 )))]: $old -> $(ec_read "$1")"
+}
+ec_dump() { ec_ready; od -An -v -tx1 -w16 -Ax "$EC_IO"; }
+ec_snap() { ec_ready; [ -n "${1:-}" ] || die "usage: ec-snap NAME"; od -An -v -tu1 -w256 "$EC_IO" | tr -s ' ' > "$STATE/snap.$1"; msg "saved snapshot $1"; }
+ec_diff() {
+  [ -f "$STATE/snap.${1:-}" ] && [ -f "$STATE/snap.${2:-}" ] || die "usage: ec-diff SNAP_A SNAP_B"
+  local a b i name
+  read -ra a < "$STATE/snap.$1"; read -ra b < "$STATE/snap.$2"
+  for i in "${!a[@]}"; do
+    [ "${a[$i]}" = "${b[$i]:-}" ] && continue
+    name=""
+    [ -s "$FIELDS" ] && name="$(awk -v o="$i" '$1<=o*8+7 && $1+$3>o*8 {printf "%s ", $2}' "$FIELDS")"
+    printf '0x%02X  %3s -> %3s  %s\n' "$i" "${a[$i]}" "${b[$i]}" "$name"
+  done
+}
+ec_undo() {
+  [ -s "$STATE/ec_undo.log" ] || die "nothing to undo"
+  ec_ready_rw
+  local off val
+  tac "$STATE/ec_undo.log" | while read -r off val; do ec_write_raw "$off" "$val"; msg "restored EC[$off]=$val"; done
+  : > "$STATE/ec_undo.log"
+}
+ec_has() { [ -s "$FIELDS" ] && awk -v n="$1" '$2==n{f=1} END{exit !f}' "$FIELDS"; }
+ec_lookup() { # NAME -> sets F_BO (bit offset) and F_BITS
+  [ -s "$FIELDS" ] || ec_fields >/dev/null
+  read -r F_BO F_BITS < <(awk -v n="$1" '$2==n{print $1, $3; exit}' "$FIELDS")
+  [ -n "${F_BO:-}" ] || die "field not found: $1"
+  [ "$F_BITS" -le 56 ] || die "field too wide: $1"
+}
+ec_getv() { # NAME -> prints integer value
+  ec_lookup "$1"
+  local b0=$((F_BO/8)) nb=$(( (F_BO%8 + F_BITS + 7)/8 )) i v=0
+  for ((i=0;i<nb;i++)); do v=$(( v | ($(ec_read $((b0+i))) << (8*i)) )); done
+  echo $(( (v >> (F_BO%8)) & ((1<<F_BITS)-1) ))
+}
+ec_setf() { # NAME VALUE: read-modify-write of one DSDT field (bit-safe), logged for ec-undo
+  ec_ready_rw
+  ec_lookup "$1"
+  local val=$(($2)) sh=$((F_BO%8)) b0=$((F_BO/8)) nb=$(( (F_BO%8 + F_BITS + 7)/8 )) i cur new mask
+  [ "$val" -ge 0 ] && [ "$val" -lt $((1<<F_BITS)) ] || die "value $val does not fit $F_BITS bits ($1)"
+  for ((i=0;i<nb;i++)); do
+    mask=$(( ((((1<<F_BITS)-1) << sh) >> (8*i)) & 0xFF ))
+    cur=$(ec_read $((b0+i)))
+    new=$(( (cur & ~mask & 0xFF) | (((val << sh) >> (8*i)) & mask) ))
+    [ "$new" = "$cur" ] && continue
+    echo "$((b0+i)) $cur" >> "$STATE/ec_undo.log"
+    ec_write_raw $((b0+i)) "$new"
+  done
+  msg "$1 = $(ec_getv "$1")"
+}
+ec_get() {
+  ec_ready
+  [ $# -gt 0 ] || die "usage: ec-get FIELD..."
+  local n v
+  for n in "$@"; do v="$(ec_getv "$n")" || exit 1; printf '%s = %d (0x%X)\n' "$n" "$v" "$v"; done
+}
+ec_watch() {
+  ec_ready
+  [ $# -gt 0 ] || die "usage: ec-watch FIELD... (Ctrl-C stops)"
+  local n
+  while :; do for n in "$@"; do printf '%s=%s ' "$n" "$(ec_getv "$n")"; done; echo; sleep 1; done
+}
+# Fan tach FN1R/FN2R are stored high byte first by this EC, so the little-endian read is byte-swapped.
+fan_ec_status() { # [watch]
+  ec_ready
+  ec_has FN1R && ec_has FN2R || die "FN1R/FN2R not in $FIELDS; run: ec-fields"
+  while :; do
+    local v1 v2 line
+    v1="$(ec_getv FN1R)"; v2="$(ec_getv FN2R)"
+    line="fan1=$(( ((v1 & 0xFF) << 8) | (v1 >> 8) ))rpm fan2=$(( ((v2 & 0xFF) << 8) | (v2 >> 8) ))rpm"
+    ec_has RTMP && line="$line temp=$(ec_getv RTMP)C"
+    local n; for n in FANM FANE FAND CBSC; do ec_has "$n" && line="$line $n=$(ec_getv "$n")"; done
+    echo "$line"
+    [ "${1:-}" = watch ] || break
+    sleep 1
+  done
+}
+ec_wait() { # FIELD VALUE [TIMEOUT_MS]
+  [ "$DRY" = 1 ] && return 0
+  local t=0
+  while [ "$(ec_getv "$1")" != "$2" ]; do sleep 0.01; t=$((t+10)); [ "$t" -ge "${3:-2000}" ] && return 1; done
+  return 0
+}
+# Keyboard protocol copied from the DSDT (\_SB.GWMI.WSAA, function 0xFB00/0x0100):
+# write LKBC=0, LKBA, LKBB/LKBG/LKBR, LKBL, LKBM, then LKCC=1; wait LKBE=1; LKBE=0; LKBS=1; wait LKBE=1.
+kbd_ec_commit() {
+  ec_setf LKCC 1 >/dev/null
+  ec_wait LKBE 1 2000 || { warn "EC did not acknowledge keyboard update (LKBE)"; return 1; }
+  ec_setf LKBE 0 >/dev/null
+  ec_setf LKBS 1 >/dev/null
+  ec_wait LKBE 1 2000 || { warn "EC did not acknowledge keyboard save (LKBE)"; return 1; }
+}
+kbd_ec_set() { # FIELD VALUE [FIELD VALUE ...]: one DSDT handshake for all given fields
+  local f a=("$@")
+  for f in LKCC LKBC LKBE LKBS; do ec_has "$f" || die "EC keyboard field $f missing in $FIELDS; run: ec-fields"; done
+  ec_setf LKBC 0 >/dev/null
+  while [ $# -ge 2 ]; do ec_setf "$1" "$2" >/dev/null; shift 2; done
+  kbd_ec_commit || return 1
+  set -- "${a[@]}"
+  while [ $# -ge 2 ]; do case "$1" in LKBA|LKBL|LKBM) echo "$2" > "$STATE/kbd_$1";; esac; shift 2; done
+}
+kbd_ec_field() { kbd_ec_set "$1" "$2"; }
+
+# ---------- ACPI discovery ----------
+dsl_path() {
+  local p
+  for p in "$ACPI_DIR/dsdt.dsl" "$PWD/dsdt.dsl" "$REAL_HOME/acpi/dsdt.dsl"; do [ -s "$p" ] && { echo "$p"; return 0; }; done
+  have acpidump && have acpixtract && have iasl || die "need acpica-tools: sudo apt install acpica-tools"
+  mkdir -p "$ACPI_DIR"; ( cd "$ACPI_DIR" && acpidump -o acpi.dat >/dev/null && acpixtract -a acpi.dat >/dev/null && iasl -d dsdt.dat >/dev/null 2>&1 )
+  [ -s "$ACPI_DIR/dsdt.dsl" ] || die "DSDT disassembly failed"
+  echo "$ACPI_DIR/dsdt.dsl"
+}
+discover() {
+  have python3 || die "python3 required"
+  local dsl; dsl="$(dsl_path)"; msg "DSDT: $dsl"
+  msg "--- WMI blocks (GUID, ACPI scope, object, instances, type) ---"
+  python3 - "$dsl" <<'PY'
+import re,sys
+txt=re.sub(r'/\*.*?\*/','',open(sys.argv[1],errors='ignore').read(),flags=re.S)
+for m in re.finditer(r'Name \(_WDG, Buffer \((0x[0-9A-Fa-f]+)\)\s*\{([^}]*)\}',txt):
+    bs=[int(x,16) for x in re.findall(r'0x([0-9A-Fa-f]{2})',m.group(2))]
+    ls=txt.rfind('\n',0,m.start())+1
+    ind=len(txt[ls:m.start()].expandtabs(4))
+    stack=[]
+    for d in re.finditer(r'^([ \t]*)(?:Device|Scope) \(([^,)]+)',txt[:m.start()],re.M):
+        i=len(d.group(1).expandtabs(4))
+        while stack and stack[-1][0]>=i: stack.pop()
+        stack.append((i,d.group(2)))
+    scope='.'.join(n for i,n in stack if i<ind)
+    for k in range(0,len(bs)-19,20):
+        e=bs[k:k+20]
+        g='%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%s'%(e[3],e[2],e[1],e[0],e[5],e[4],e[7],e[6],e[8],e[9],''.join('%02X'%x for x in e[10:16]))
+        o=chr(e[16])+chr(e[17]); f=e[19]
+        if f&2: t='METHOD WM'+o
+        elif f&8: t='EVENT notify 0x%02X'%e[16]
+        else: t='DATA '+o
+        print('%s  %-24s  %s  x%d  %s'%(g,scope,o if f&2 else '--',e[18],t))
+PY
+  msg "--- EC OperationRegion ---"
+  grep -n "EmbeddedControl" "$dsl" | head
+  msg "run: ec-fields | grep -i -E 'fan|kb|led|rgb|bl|temp'"
+}
+ec_fields() {
+  have python3 || die "python3 required"
+  local dsl; dsl="$(dsl_path)"
+  python3 - "$dsl" > "$FIELDS" <<'PY'
+import re,sys
+txt=re.sub(r'/\*.*?\*/|//[^\n]*','',open(sys.argv[1],errors='ignore').read(),flags=re.S)
+reg=re.search(r'OperationRegion \((\w+), EmbeddedControl',txt)
+if reg:
+    n=reg.group(1)
+    for fm in re.finditer(r'Field \((\w+),[^)]*\)\s*\{([^}]*)\}',txt):
+        if fm.group(1)!=n: continue
+        pos=0
+        for line in fm.group(2).split('\n'):
+            line=line.strip()
+            if not line or line.startswith('AccessAs'): continue
+            o=re.match(r'Offset \((0x[0-9A-Fa-f]+|\d+)\)',line)
+            if o: pos=int(o.group(1),0)*8; continue
+            f=re.match(r'(\w*)\s*,\s*(\d+)',line)
+            if f:
+                if f.group(1): print(pos,f.group(1),int(f.group(2)))
+                pos+=int(f.group(2))
+PY
+  awk '{printf "0x%02X.%d  %-8s %3d bit\n", int($1/8), $1%8, $2, $3}' "$FIELDS"
+}
+acpi_call() {
+  [ "${CONFIRM:-0}" = 1 ] || die "set CONFIRM=1. Arbitrary ACPI calls can disable thermal/fan control."
+  have modprobe && modprobe acpi_call 2>/dev/null
+  [ -w /proc/acpi/call ] || die "acpi_call missing: sudo apt install acpi-call-dkms"
+  printf '%s' "$*" > /proc/acpi/call; cat /proc/acpi/call; echo
+}
+
+# ---------- CPU ----------
+cpu_gov() { local g="${1:-}" f; [ -n "$g" ] || die "usage: cpu-gov performance|powersave"
+  for f in "$CPUF"/cpu[0-9]*/cpufreq/scaling_governor; do setf "$f" "$g"; done; }
+cpu_epp() { local v="${1:-}" f; [ -n "$v" ] || die "usage: cpu-epp performance|balance_performance|default|balance_power|power"
+  for f in "$CPUF"/cpu[0-9]*/cpufreq/energy_performance_preference; do setf "$f" "$v"; done; }
+turbo() { local f="$CPUF/intel_pstate/no_turbo"; [ -e "$f" ] || die "intel_pstate not active"
+  case "${1:-}" in on) setf "$f" 0;; off) setf "$f" 1;; *) die "usage: turbo on|off";; esac; }
+cpu_freq() { isnum "${1:-}" && isnum "${2:-}" || die "usage: cpu-freq MIN_MHZ MAX_MHZ"
+  local f; for f in "$CPUF"/cpu[0-9]*/cpufreq; do setf "$f/scaling_max_freq" $(($2*1000)); setf "$f/scaling_min_freq" $(($1*1000)); done; }
+rapl_set() {
+  local pl1="${1:-}" pl2="${2:-}" cur
+  isnum "$pl1" || die "usage: rapl PL1_WATTS [PL2_WATTS]"
+  [ -d "$RAPL" ] || die "RAPL unavailable"
+  if [ "$FORCE" != 1 ] && { [ "$pl1" -gt 120 ] || [ "${pl2:-0}" -gt 135 ]; }; then die "limit too high (FORCE=1 overrides)"; fi
+  setf "$RAPL/constraint_0_power_limit_uw" $((pl1*1000000))
+  [ -n "$pl2" ] && isnum "$pl2" && setf "$RAPL/constraint_1_power_limit_uw" $((pl2*1000000))
+  [ "$DRY" = 1 ] && return 0
+  cur=$(( $(cat "$RAPL/constraint_0_power_limit_uw") / 1000000 ))
+  [ "$cur" = "$pl1" ] || warn "PL1 reads back ${cur}W: firmware-locked or EC overrides it"
+  msg "PL1=${cur}W PL2=$(( $(cat "$RAPL/constraint_1_power_limit_uw" 2>/dev/null || echo 0) / 1000000 ))W"
+}
+
+# ---------- GPU ----------
+gpu_need() { have nvidia-smi || die "nvidia-smi not found"; }
+gpu_status() { gpu_need
+  nvidia-smi --query-gpu=name,driver_version,pstate,temperature.gpu,power.draw,power.limit,power.min_limit,power.max_limit,clocks.gr,clocks.max.gr,clocks.mem,fan.speed --format=csv; }
+gpu_pl() { gpu_need; isnum "${1:-}" || die "usage: gpu-pl WATTS"; run nvidia-smi -pm 1 >/dev/null; run nvidia-smi -pl "$1"; }
+gpu_lock() { gpu_need; isnum "${1:-}" && isnum "${2:-}" || die "usage: gpu-lock MIN_MHZ MAX_MHZ"; run nvidia-smi -lgc "$1,$2"; }
+gpu_unlock() { gpu_need; run nvidia-smi -rgc; run nvidia-smi -rmc 2>/dev/null; }
+gpu_offset() { have nvidia-settings || die "nvidia-settings not found"
+  [[ "${1:-}" =~ ^-?[0-9]+$ && "${2:-}" =~ ^-?[0-9]+$ ]] || die "usage: gpu-offset CORE_MHZ MEM_MHZ (X11 + Coolbits required)"
+  [ "$FORCE" = 1 ] || { [ "$1" -le 200 ] && [ "$2" -le 1000 ] || die "offset too high (FORCE=1 overrides)"; }
+  run sudo -u "$REAL_USER" env DISPLAY="${DISPLAY:-:0}" XAUTHORITY="$REAL_HOME/.Xauthority" \
+    nvidia-settings -a "[gpu:0]/GPUGraphicsClockOffsetAllPerformanceLevels=$1" -a "[gpu:0]/GPUMemoryTransferRateOffsetAllPerformanceLevels=$2"; }
+gpu_coolbits() { mkdir -p /etc/X11/xorg.conf.d
+  cat > /etc/X11/xorg.conf.d/20-nvidia-coolbits.conf <<'EOF'
+Section "Device"
+    Identifier "NVIDIA"
+    Driver "nvidia"
+    Option "Coolbits" "28"
+EndSection
+EOF
+  msg "written. Log out/in under an X11 session. Wayland ignores this."; }
+
+# ---------- platform profile ----------
+profile() {
+  local f=/sys/firmware/acpi/platform_profile
+  [ -e "$f" ] || { warn "no platform_profile (needs a vendor platform driver)"; return 1; }
+  if [ -z "${1:-}" ]; then echo "current: $(cat $f)"; echo "choices: $(cat ${f}_choices)"; return; fi
+  setf "$f" "$1"
+}
+
+# ---------- fan ----------
+fan_hwmon() { local h; for h in /sys/class/hwmon/hwmon*; do [ -e "$h/pwm1" ] && [ -e "$h/pwm1_enable" ] && { echo "$h"; return 0; }; done; return 1; }
+fan_set() {
+  local arg="${1:-}" h o duty
+  [ -n "$arg" ] || die "usage: fan auto|PERCENT"
+  if [ "$arg" != auto ]; then
+    isnum "$arg" && [ "$arg" -le 100 ] || die "PERCENT must be 0-100"
+    [ "$arg" -lt 30 ] && [ "$FORCE" != 1 ] && die "below 30% refused (FORCE=1 overrides). Watch temperatures."
+  fi
+  if h="$(fan_hwmon)"; then
+    if [ "$arg" = auto ]; then setf "$h/pwm1_enable" 2
+    else setf "$h/pwm1_enable" 1; for o in "$h"/pwm[0-9]; do setf "$o" $((arg*255/100)); done; fi
+    return
+  fi
+  [ -n "$EC_FAN_DUTY_OFFS" ] || die "no hwmon pwm and no EC fan map in $CONF. Use discover / ec-fields / ec-snap / ec-diff to find offsets."
+  if [ "$arg" = auto ]; then
+    [ -n "$EC_FAN_MODE_OFF" ] && [ -n "$EC_FAN_MODE_AUTO" ] || die "EC_FAN_MODE_OFF/AUTO not set"
+    ec_set "$EC_FAN_MODE_OFF" "$EC_FAN_MODE_AUTO"
+  else
+    [ -n "$EC_FAN_MODE_OFF" ] && [ -n "$EC_FAN_MODE_MANUAL" ] && ec_set "$EC_FAN_MODE_OFF" "$EC_FAN_MODE_MANUAL"
+    duty=$((arg*EC_FAN_DUTY_MAX/100))
+    for o in $EC_FAN_DUTY_OFFS; do ec_set "$o" "$duty"; done
+  fi
+}
+
+# ---------- keyboard ----------
+kbd_led() { local d; for d in /sys/class/leds/*kbd_backlight* /sys/class/leds/*rgb*kbd* /sys/class/leds/rgb:kbd*; do [ -d "$d" ] && { echo "$d"; return 0; }; done; return 1; }
+kbd_brightness() {
+  local pct="${1:-}" d max
+  isnum "$pct" && [ "$pct" -le 100 ] || die "usage: kbd-brightness 0-100"
+  if d="$(kbd_led)"; then max="$(cat "$d/max_brightness")"; setf "$d/brightness" $((pct*max/100))
+  elif [ -n "$EC_KBD_BRIGHT_OFF" ]; then ec_set "$EC_KBD_BRIGHT_OFF" $((pct*EC_KBD_BRIGHT_MAX/100))
+  else die "no keyboard backlight interface. Needs a driver or EC map (see discover / ec-diff)."; fi
+  echo "$pct" > "$STATE/kbd_brightness"
+}
+kbd_color() {
+  local hex="${1#\#}" r g b d max
+  [[ "$hex" =~ ^[0-9A-Fa-f]{6}$ ]] || die "usage: kbd-color RRGGBB"
+  r=$((16#${hex:0:2})); g=$((16#${hex:2:2})); b=$((16#${hex:4:2}))
+  if d="$(kbd_led)" && [ -e "$d/multi_intensity" ]; then
+    max="$(cat "$d/max_brightness")"; setf "$d/multi_intensity" "$((r*max/255)) $((g*max/255)) $((b*max/255))"
+  elif ec_has LKBR && ec_has LKBG && ec_has LKBB && ec_has LKCC && ec_has LKBC && ec_has LKBE && ec_has LKBS; then
+    kbd_ec_set LKBR "$r" LKBG "$g" LKBB "$b" || return 1
+  elif [ -n "$EC_KBD_R_OFF" ] && [ -n "$EC_KBD_G_OFF" ] && [ -n "$EC_KBD_B_OFF" ]; then
+    ec_set "$EC_KBD_R_OFF" $((r*EC_KBD_COLOR_MAX/255)); ec_set "$EC_KBD_G_OFF" $((g*EC_KBD_COLOR_MAX/255)); ec_set "$EC_KBD_B_OFF" $((b*EC_KBD_COLOR_MAX/255))
+  else die "no RGB interface. Needs a driver or EC map (see discover / ec-diff)."; fi
+  echo "$hex" > "$STATE/kbd_color"
+}
+restore() { # re-apply saved keyboard state; one EC save only when the EC differs from it
+  [ -s "$FIELDS" ] || return 0
+  local args=() f hex i same
+  if [ -s "$STATE/kbd_color" ]; then
+    hex="$(cat "$STATE/kbd_color")"
+    [[ "$hex" =~ ^[0-9A-Fa-f]{6}$ ]] && args+=(LKBR $((16#${hex:0:2})) LKBG $((16#${hex:2:2})) LKBB $((16#${hex:4:2})))
+  fi
+  for f in LKBA LKBL LKBM; do [ -s "$STATE/kbd_$f" ] && args+=("$f" "$(cat "$STATE/kbd_$f")"); done
+  [ ${#args[@]} -gt 0 ] || return 0
+  same="$( { ec_ready && for ((i=0;i<${#args[@]};i+=2)); do [ "$(ec_getv "${args[i]}")" = "${args[i+1]}" ] || { echo 0; exit; }; done; echo 1; } 2>/dev/null )"
+  if [ "$same" = 1 ]; then msg "keyboard state already applied"; else try kbd_ec_set "${args[@]}"; fi
+  return 0
+}
+
+# ---------- presets ----------
+preset() {
+  local epp turbo_v p1 p2 fan prof
+  case "${1:-}" in
+    quiet)       epp=power;               turbo_v=off; p1=20; p2=30; fan=auto; prof=low-power ;;
+    balanced)    epp=balance_performance; turbo_v=on;  p1=45; p2=65; fan=auto; prof=balanced ;;
+    performance) epp=performance;         turbo_v=on;  p1=65; p2=90; fan=auto; prof=performance ;;
+    max)         epp=performance;         turbo_v=on;  p1=70; p2=95; fan=100;  prof=performance ;;
+    *) die "usage: preset quiet|balanced|performance|max" ;;
+  esac
+  try cpu_epp "$epp"; try turbo "$turbo_v"; try rapl_set "$p1" "$p2"
+  try profile "$prof"; try fan_set "$fan"
+  msg "preset $1 applied"
+}
+install_service() {
+  local p="${1:-none}"
+  [ "$SELF" = /usr/local/bin/casper-ctl ] || install -m755 "$SELF" /usr/local/bin/casper-ctl
+  cat > /etc/systemd/system/casper-ctl.service <<EOF
+[Unit]
+Description=casper-ctl: apply saved keyboard state (and preset) at boot
+After=multi-user.target systemd-modules-load.service
+
+[Service]
+Type=oneshot
+Environment=CASPER_CONF_DIR=$CONF_DIR
+ExecStart=/usr/local/bin/casper-ctl boot $p
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  cat > /etc/systemd/system/casper-ctl-resume.service <<EOF
+[Unit]
+Description=casper-ctl: re-apply settings after suspend/hibernate
+After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+[Service]
+Type=oneshot
+Environment=CASPER_CONF_DIR=$CONF_DIR
+ExecStart=/usr/local/bin/casper-ctl boot $p
+
+[Install]
+WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+EOF
+  systemctl daemon-reload && systemctl enable casper-ctl.service casper-ctl-resume.service
+  msg "installed: 'boot $p' runs at boot and after resume ('none' = keyboard restore only)."
+}
+
+# ---------- status ----------
+status() {
+  local f h t
+  msg "== DMI"; paste -sd' ' /sys/class/dmi/id/sys_vendor /sys/class/dmi/id/product_name /sys/class/dmi/id/board_name
+  msg "== CPU"; grep -m1 'model name' /proc/cpuinfo
+  for f in scaling_driver scaling_governor energy_performance_preference scaling_min_freq scaling_max_freq; do
+    [ -r "$CPUF/cpu0/cpufreq/$f" ] && echo "$f: $(cat "$CPUF/cpu0/cpufreq/$f")"; done
+  [ -r "$CPUF/intel_pstate/no_turbo" ] && echo "no_turbo: $(cat "$CPUF/intel_pstate/no_turbo")"
+  [ -d "$RAPL" ] && echo "RAPL PL1=$(( $(cat $RAPL/constraint_0_power_limit_uw) / 1000000 ))W PL2=$(( $(cat $RAPL/constraint_1_power_limit_uw 2>/dev/null || echo 0) / 1000000 ))W"
+  msg "== platform_profile"; profile 2>/dev/null || echo "none"
+  msg "== GPU"; have nvidia-smi && gpu_status || echo "nvidia-smi missing"
+  msg "== hwmon"
+  for h in /sys/class/hwmon/hwmon*; do
+    printf '%s: %s' "$(basename "$h")" "$(cat "$h/name" 2>/dev/null)"
+    for t in "$h"/temp*_input "$h"/fan*_input "$h"/pwm[0-9]; do [ -e "$t" ] && printf ' %s=%s' "$(basename "$t")" "$(cat "$t" 2>/dev/null)"; done; echo
+  done
+  msg "== LEDs (non-input)"; t=""
+  for f in /sys/class/leds/*; do case "${f##*/}" in input*|enp*|phy*|'*') ;; *) t="$t ${f##*/}";; esac; done
+  echo "${t:- none}"
+  msg "== kbd backlight iface"; kbd_led || echo "none"
+  msg "== EC"; if [ -r "$EC_IO" ]; then echo "ec_sys available"; else echo "ec_sys not loaded (ec-* commands load it)"; fi
+  msg "== fans (EC)"; ( fan_ec_status ) 2>&1 || echo "unavailable"
+  msg "== EC map"; [ -f "$CONF" ] && grep -E '^EC_[A-Z_]+="?[^"[:space:]]' "$CONF" || echo "not configured ($CONF)"
+}
+
+usage() { cat <<'EOF'
+casper-ctl COMMAND [ARGS]
+  env: DRY=1 print only; FORCE=1 lift safety limits; CASPER_SKIP_BOARD_CHECK=1 allow EC writes on other boards
+
+ status                         show all readable state
+ preset quiet|balanced|performance|max
+ boot PRESET|none               apply preset (unless none) + restore saved keyboard state
+ install-service [PRESET|none]  run 'boot' at every boot and resume (systemd)
+ shell                          line protocol on stdin/stdout for the GUI ("@@DONE rc" ends each reply)
+
+ cpu-gov GOV                    performance|powersave
+ cpu-epp VALUE                  performance|balance_performance|default|balance_power|power
+ turbo on|off
+ cpu-freq MIN_MHZ MAX_MHZ
+ rapl PL1_W [PL2_W]             CPU package power limits (the real "overclock" on a locked CPU)
+
+ gpu-status
+ gpu-pl WATTS                   power limit (many laptop vBIOS reject this)
+ gpu-lock MIN_MHZ MAX_MHZ | gpu-unlock
+ gpu-offset CORE_MHZ MEM_MHZ    needs gpu-coolbits + X11
+ gpu-coolbits                   enable Coolbits=28 in Xorg config
+
+ profile [NAME]                 ACPI platform_profile
+ fan auto|PERCENT               hwmon pwm, else EC map from ec.conf
+ kbd-brightness 0-100
+ kbd-color RRGGBB               LED class multi_intensity, else EC map from ec.conf
+ restore                        re-apply saved keyboard color/brightness
+
+ discover                       dump/decode DSDT: WMI GUIDs->scope/method, EC region
+ ec-fields                      EC field names/offsets from DSDT
+ kbd-level 0|1|2               raw LKBL via DSDT handshake (meaning of values: observe with Fn key)
+ kbd-mode N | kbd-effect N      raw LKBM / LKBA (0-15) via DSDT handshake
+ ec-get FIELD...                read EC fields by DSDT name
+ ec-watch FIELD...              print fields every second (Ctrl-C stops)
+ fan-status [watch]             fan RPM (both fans), temperature, FANM/FANE/FAND/CBSC
+ ec-setf FIELD VALUE            bit-safe write of one DSDT field (logged for ec-undo)
+ ec-dump                        hex dump of 256-byte EC space
+ ec-snap NAME / ec-diff A B     snapshot EC, diff two snapshots (change one setting between)
+ ec-set OFFSET VALUE            write EC byte (logged)
+ ec-undo                        restore all bytes written by ec-set/fan/kbd
+ acpi-call 'METHOD ARGS'        raw ACPI call (CONFIRM=1 required)
+ init-config                    create ec.conf template
+EOF
+}
+
+# ---------- dispatch ----------
+dispatch() {
+  local cmd="${1:-help}"; [ $# -gt 0 ] && shift
+  case "$cmd" in
+    status) status;;
+    preset) preset "${1:-}";;
+    boot) [ "${1:-none}" = none ] || try preset "$1"; restore;;
+    install-service) install_service "${1:-none}";;
+    cpu-gov) cpu_gov "${1:-}";;
+    cpu-epp) cpu_epp "${1:-}";;
+    turbo) turbo "${1:-}";;
+    cpu-freq) cpu_freq "${1:-}" "${2:-}";;
+    rapl) rapl_set "${1:-}" "${2:-}";;
+    gpu-status) gpu_status;;
+    gpu-pl) gpu_pl "${1:-}";;
+    gpu-lock) gpu_lock "${1:-}" "${2:-}";;
+    gpu-unlock) gpu_unlock;;
+    gpu-offset) gpu_offset "${1:-}" "${2:-}";;
+    gpu-coolbits) gpu_coolbits;;
+    profile) profile "${1:-}";;
+    fan) fan_set "${1:-}";;
+    kbd-brightness) kbd_brightness "${1:-}";;
+    kbd-color) kbd_color "${1:-}";;
+    kbd-level) isnum "${1:-}" && [ "$1" -le 2 ] || die "usage: kbd-level 0|1|2"; kbd_ec_field LKBL "$1";;
+    kbd-mode) isnum "${1:-}" && [ "$1" -le 15 ] || die "usage: kbd-mode 0-15"; kbd_ec_field LKBM "$1";;
+    kbd-effect) isnum "${1:-}" && [ "$1" -le 15 ] || die "usage: kbd-effect 0-15"; kbd_ec_field LKBA "$1";;
+    restore) restore;;
+    discover) discover;;
+    ec-fields) ec_fields;;
+    ec-get) ec_get "$@";;
+    ec-watch) ec_watch "$@";;
+    fan-status) fan_ec_status "${1:-}";;
+    ec-setf) [ -n "${1:-}" ] && [ -n "${2:-}" ] || die "usage: ec-setf FIELD VALUE"; ec_setf "$1" "$2";;
+    ec-dump) ec_dump;;
+    ec-snap) ec_snap "${1:-}";;
+    ec-diff) ec_diff "${1:-}" "${2:-}";;
+    ec-set) [ -n "${1:-}" ] && [ -n "${2:-}" ] || die "usage: ec-set OFFSET VALUE"; ec_set "$1" "$2";;
+    ec-undo) ec_undo;;
+    acpi-call) acpi_call "$@";;
+    init-config) init_conf;;
+    *) usage; exit 1;;
+  esac
+}
+
+shell_mode() { # GUI helper: one command per stdin line, reply then "@@DONE <rc>"
+  local line out rc
+  set -f
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    [ "$line" = quit ] && break
+    case "$line" in
+      shell*|install-service*|acpi-call*|ec-watch*|*" watch"*) out="command not available in shell mode"; rc=2;;
+      *) # shellcheck disable=SC2086
+         out="$( (dispatch $line) 2>&1 )"; rc=$?;;
+    esac
+    printf '%s\n@@DONE %d\n' "$out" "$rc"
+  done
+}
+
+cmd="${1:-help}"; [ $# -gt 0 ] && shift
+case "$cmd" in help|-h|--help) usage; exit 0;; esac
+if [ "$EUID" -ne 0 ]; then exec sudo -E CASPER_CONF_DIR="$CONF_DIR" bash "$SELF" "$cmd" "$@"; fi
+case "$CONF_DIR" in "$REAL_HOME"/*) chown -R "$REAL_USER" "$CONF_DIR" 2>/dev/null;; esac
+
+if [ "$cmd" = shell ]; then shell_mode; exit 0; fi
+dispatch "$cmd" "$@"

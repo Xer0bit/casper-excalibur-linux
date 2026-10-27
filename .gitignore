@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+# ACPI dumps can contain machine-specific data; never commit them
+*.dat
+*.dsl
+acpi/
+ec_fields*.txt
+snap.*
