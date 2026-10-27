@@ -1,5 +1,7 @@
 # casper-excalibur-linux
 
+**English** | [Türkçe](README.tr.md)
+
 Linux control for the **Casper Excalibur G900** (board `NLCB 001`, Insyde BIOS, i7-10750H, RTX 2060 Mobile).
 Casper only ships Windows software for keyboard lighting and fan/performance settings. This project talks to the
 same embedded controller (EC) and kernel interfaces from Linux:
