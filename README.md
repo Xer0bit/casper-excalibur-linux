@@ -26,7 +26,7 @@ The EC register map was reverse-engineered from this laptop's own ACPI DSDT. Not
 ## Install
 
 ```
-git clone <your repo url> casper-excalibur-linux
+git clone https://github.com/Xer0bit/casper-excalibur-linux.git casper-excalibur-linux
 cd casper-excalibur-linux
 sudo ./install.sh
 ```
@@ -100,19 +100,6 @@ verified map for another board is welcome.
 ```
 ./tests/run.sh
 ```
-
-## Put this on GitHub
-
-```
-cd casper-excalibur-linux
-git status                      # history is already committed
-gh repo create casper-excalibur-linux --private --source=. --push
-# or: create an empty repo on github.com, then
-git remote add origin git@github.com:<you>/casper-excalibur-linux.git
-git push -u origin main
-```
-
-Do not commit ACPI dumps (`*.dat`, `*.dsl`); they are in `.gitignore` because they can contain machine-specific data.
 
 ## License
 

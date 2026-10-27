@@ -19,7 +19,7 @@ You do not need to install these by hand. `doctor` finds what is missing and ins
 ## 2. Install (three commands)
 
 ```
-git clone <your repo url> casper-excalibur-linux
+git clone https://github.com/Xer0bit/casper-excalibur-linux.git casper-excalibur-linux
 cd casper-excalibur-linux
 sudo ./install.sh
 ```
