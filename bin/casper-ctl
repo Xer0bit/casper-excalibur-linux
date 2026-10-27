@@ -16,7 +16,7 @@ STATE="$CONF_DIR/state"
 FIELDS="$CONF_DIR/ec_fields.txt"
 ACPI_DIR="$CONF_DIR/acpi"
 EC_IO="${EC_IO:-/sys/kernel/debug/ec/ec0/io}"
-CPUF=/sys/devices/system/cpu
+CPUF="${CPUF:-/sys/devices/system/cpu}"
 RAPL=/sys/class/powercap/intel-rapl:0
 DRY="${DRY:-0}"
 FORCE="${FORCE:-0}"
@@ -545,14 +545,14 @@ dispatch() {
 
 shell_mode() { # GUI helper: one command per stdin line, reply then "@@DONE <rc>"
   local line out rc
-  set -f
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     [ "$line" = quit ] && break
     case "$line" in
       shell*|install-service*|acpi-call*|ec-watch*|*" watch"*) out="command not available in shell mode"; rc=2;;
-      *) # shellcheck disable=SC2086
-         out="$( (dispatch $line) 2>&1 )"; rc=$?;;
+      *) # split the line without globbing, but keep globbing on for the commands themselves
+         set -f; set -- $line; set +f   # shellcheck disable=SC2086
+         out="$( (dispatch "$@") 2>&1 )"; rc=$?;;
     esac
     printf '%s\n@@DONE %d\n' "$out" "$rc"
   done

@@ -102,6 +102,11 @@ out="$(printf 'ec-get LKBG\nbogus\nec-watch X\nquit\n' | bash "$CTL" shell 2>&1)
 has "shell: ok reply"        "@@DONE 0" "$out"
 has "shell: unknown command" "@@DONE 1" "$out"
 has "shell: blocked command" "@@DONE 2" "$out"
+# globbing must work inside shell mode (regression: set -f broke cpu[0-9]* paths)
+mkdir -p "$T/cpu/cpu0/cpufreq"; echo powersave > "$T/cpu/cpu0/cpufreq/scaling_governor"
+out="$(printf 'cpu-gov performance\nquit\n' | CPUF="$T/cpu" bash "$CTL" shell 2>&1)"
+has "shell: glob expands" "@@DONE 0" "$out"
+check "shell: governor written" "performance" "$(cat "$T/cpu/cpu0/cpufreq/scaling_governor")"
 
 # --- GUI helper protocol (no GTK needed)
 out="$(python3 -I - "$ROOT/gui/casper-gui.py" "$CTL" <<'PY' 2>&1
