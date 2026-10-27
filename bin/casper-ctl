@@ -27,7 +27,8 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 isnum(){ [[ "${1:-}" =~ ^[0-9]+$ ]]; }
 run()  { if [ "$DRY" = 1 ]; then msg "DRY: $*"; else "$@"; fi; }
-try()  { ( "$@" ) || warn "step failed: $*"; }
+FAILED=0
+try()  { ( "$@" ) || { warn "step failed: $*"; FAILED=$((FAILED+1)); }; }
 
 setf() {
   local f="$1" v="$2"
@@ -394,7 +395,7 @@ preset() {
   esac
   try cpu_epp "$epp"; try turbo "$turbo_v"; try rapl_set "$p1" "$p2"
   try profile "$prof"; try fan_set "$fan"
-  msg "preset $1 applied"
+  if [ "$FAILED" -gt 0 ]; then msg "preset $1 applied with $FAILED step(s) skipped"; else msg "preset $1 applied"; fi
 }
 install_service() {
   local p="${1:-none}"
