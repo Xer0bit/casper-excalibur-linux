@@ -11,6 +11,8 @@ same embedded controller (EC) and kernel interfaces from Linux:
 
 The EC register map was reverse-engineered from this laptop's own ACPI DSDT. Nothing here is endorsed by Casper.
 
+![casper-gui: live fan and temperature dashboard, keyboard color swatches](docs/images/casper-gui.png)
+
 ## Status
 
 | Feature | State |
@@ -22,7 +24,7 @@ The EC register map was reverse-engineered from this laptop's own ACPI DSDT. Not
 | Fan speed control | **Not available.** The DSDT has no fan-speed write; `FANE`/`FAND` effect unclear (see `docs/EC-MAP.en.md`) |
 | CPU power limits, turbo, EPP, governor, presets | Implemented through standard sysfs; not yet confirmed on hardware |
 | GPU clock lock / power limit | Implemented through `nvidia-smi`; the power limit is `N/A` on this vBIOS |
-| GTK GUI | Implemented; compile-checked and its helper protocol tested, but not yet run on a display |
+| GTK GUI | Works on hardware (screenshot above) |
 | Offline test suite | `tests/run.sh` (fake EC image, no hardware needed) |
 
 ## Install

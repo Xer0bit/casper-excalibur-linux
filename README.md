@@ -16,6 +16,8 @@ Casper fan hızı Linux, Casper oyuncu dizüstü Ubuntu, NLCB 001, Insyde BIOS, 
 klavye aydınlatma, fan devri (RPM), sıcaklık izleme, CPU güç sınırı (PL1/PL2), turbo, RTX 2060 saat kilidi,
 Ubuntu, Debian, GTK3, bash.
 
+![casper-gui: canlı fan ve sıcaklık paneli, klavye renk düğmeleri](docs/images/casper-gui.png)
+
 ## Durum
 
 | Özellik | Durum |
@@ -27,7 +29,7 @@ Ubuntu, Debian, GTK3, bash.
 | Fan hızı ayarı | **Yok.** Bu kartın EC fan arayüzü çözülmedi, yalnızca izleme var |
 | CPU güç sınırları, turbo, EPP, governor, hazır profiller | Standart sysfs üzerinden |
 | GPU saat kilidi / güç sınırı | `nvidia-smi` ile; bu vBIOS güç sınırını `N/A` bildirir |
-| GTK arayüzü | Çalışıyor |
+| GTK arayüzü | Donanımda çalışıyor (yukarıdaki ekran görüntüsü) |
 | Çevrimdışı test paketi | `tests/run.sh` (sahte EC imajı, donanım gerekmez) |
 
 ## Kurulum (Ubuntu)
