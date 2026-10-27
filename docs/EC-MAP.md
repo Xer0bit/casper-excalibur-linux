@@ -1,5 +1,7 @@
 # EC / ACPI map: Casper Excalibur G900 (board NLCB 001)
 
+**English** | [Türkçe](EC-MAP.tr.md)
+
 Source: this laptop's DSDT (Insyde, `CML`), decoded with `casper-ctl discover` and `casper-ctl ec-fields`.
 "Observed" means seen on the running machine. "Inferred" means read from DSDT code and not yet confirmed by a test.
 

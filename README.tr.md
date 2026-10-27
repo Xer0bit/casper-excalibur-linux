@@ -48,7 +48,7 @@ sudo casper-ctl doctor --fix    # eksikleri kurar, sonra tekrar kontrol eder
 `doctor` şunlara bakar: kart modeli, `ec_sys`, Secure Boot kilidi, `acpica-tools`, GTK3, `pkexec`, NVIDIA sürücüsü,
 `intel_pstate` ve RAPL. NVIDIA sürücüsünü yeniden başlatma gerektirdiği için kurmadan önce sorar.
 
-Ayrıntılı rehber (İngilizce): [docs/INSTALL.md](docs/INSTALL.md).
+Ayrıntılı rehber: [docs/INSTALL.tr.md](docs/INSTALL.tr.md) ([English](docs/INSTALL.md)).
 
 Klavye rengini yeniden başlatma ve uykudan sonra korumak için:
 
@@ -81,7 +81,7 @@ casper-gui                                # grafik arayüz
 ## Katkı
 
 Başka bir Casper veya Tongfang tabanlı modelin doğrulanmış EC haritasını içeren pull request'ler memnuniyetle
-karşılanır. Yöntem için [docs/EC-MAP.md](docs/EC-MAP.md) dosyasına bakın.
+karşılanır. Yöntem için [docs/EC-MAP.tr.md](docs/EC-MAP.tr.md) dosyasına bakın.
 
 ## Lisans
 

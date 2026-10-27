@@ -15,6 +15,8 @@ install -Dm644 data/casper-gui.svg "$pkg/usr/share/icons/hicolor/scalable/apps/c
 install -Dm644 README.md    "$pkg/usr/share/doc/$name/README.md"
 install -Dm644 README.tr.md "$pkg/usr/share/doc/$name/README.tr.md"
 install -Dm644 docs/INSTALL.md "$pkg/usr/share/doc/$name/INSTALL.md"
+install -Dm644 docs/INSTALL.tr.md "$pkg/usr/share/doc/$name/INSTALL.tr.md"
+install -Dm644 docs/EC-MAP.tr.md "$pkg/usr/share/doc/$name/EC-MAP.tr.md"
 install -Dm644 docs/EC-MAP.md  "$pkg/usr/share/doc/$name/EC-MAP.md"
 install -Dm644 LICENSE "$pkg/usr/share/doc/$name/copyright"
 

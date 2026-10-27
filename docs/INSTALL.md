@@ -1,5 +1,7 @@
 # Installing on Ubuntu
 
+**English** | [Türkçe](INSTALL.tr.md)
+
 Supported: Ubuntu 22.04, 24.04 and newer (also Debian-based derivatives), stock `linux-generic` kernel.
 Tested on a Casper Excalibur G900 (board `NLCB 001`) running Ubuntu 26.04, kernel 7.0.
 
