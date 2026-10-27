@@ -34,6 +34,9 @@ sudo ./install.sh
 The installer puts `casper-ctl` and `casper-gui` in `/usr/local/bin`, creates `/etc/casper-ctl`, and decodes the EC
 field map from your DSDT (`sudo casper-ctl ec-fields`; needs `acpica-tools`, installed automatically on apt systems).
 
+Step-by-step guide, requirements and troubleshooting: [docs/INSTALL.md](docs/INSTALL.md).
+Check for missing drivers any time: `sudo casper-ctl doctor` (`--fix` installs them).
+
 Keep the keyboard color across reboots and suspend:
 
 ```

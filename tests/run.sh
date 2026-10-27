@@ -102,6 +102,9 @@ out="$(printf 'ec-get LKBG\nbogus\nec-watch X\nquit\n' | bash "$CTL" shell 2>&1)
 has "shell: ok reply"        "@@DONE 0" "$out"
 has "shell: unknown command" "@@DONE 1" "$out"
 has "shell: blocked command" "@@DONE 2" "$out"
+out="$(ctl doctor)"
+has "doctor: reports board"  " board " "$out"
+has "doctor: reports ec_sys" " ec_sys " "$out"
 # globbing must work inside shell mode (regression: set -f broke cpu[0-9]* paths)
 mkdir -p "$T/cpu/cpu0/cpufreq"; echo powersave > "$T/cpu/cpu0/cpufreq/scaling_governor"
 out="$(printf 'cpu-gov performance\nquit\n' | CPUF="$T/cpu" bash "$CTL" shell 2>&1)"

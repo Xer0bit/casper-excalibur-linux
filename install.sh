@@ -39,5 +39,7 @@ else
 fi
 
 echo
+/usr/local/bin/casper-ctl doctor || echo "Run 'sudo casper-ctl doctor --fix' to install what is missing."
+echo
 echo "Installed. Try:  sudo casper-ctl status    |    casper-gui"
 echo "Keep keyboard color across boot/resume:  sudo casper-ctl install-service none"

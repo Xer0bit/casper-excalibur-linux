@@ -455,11 +455,81 @@ status() {
   msg "== EC map"; [ -f "$CONF" ] && grep -E '^EC_[A-Z_]+="?[^"[:space:]]' "$CONF" || echo "not configured ($CONF)"
 }
 
+# ---------- doctor: detect missing drivers/packages ----------
+# Read-only by default. '--fix' installs missing apt packages, loads RAPL, builds the EC map, and offers the NVIDIA driver.
+DOC_MISSING=0
+drow() { printf '%-8s %-14s %s\n' "$1" "$2" "$3"; [ "$1" != MISSING ] || DOC_MISSING=$((DOC_MISSING+1)); }
+doctor() {
+  local fix=0 pkgs="" lock vendor board osid pk gpu_bad=0 ans
+  [ "${1:-}" = --fix ] && fix=1
+  DOC_MISSING=0
+  osid="$(sed -n 's/^ID\(_LIKE\)\?=//p' /etc/os-release 2>/dev/null | tr -d '"' | tr '\n' ' ')"
+  drow info os "$(sed -n 's/^PRETTY_NAME="\(.*\)"/\1/p' /etc/os-release 2>/dev/null) / kernel $(uname -r)"
+  have apt-get || drow MISSING apt "apt-get not found: this guide targets Ubuntu/Debian; install the packages below by hand"
+  case "$osid" in *ubuntu*|*debian*) ;; *) drow warn os "not Ubuntu/Debian ('$osid'): untested";; esac
+
+  vendor="$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null)"; board="$(cat /sys/class/dmi/id/board_name 2>/dev/null)"
+  if [ "$board" = "NLCB 001" ]; then drow ok board "Casper Excalibur G900 ($board): all features"
+  elif [[ "${vendor^^}" == *CASPER* ]]; then drow warn board "Casper '$board' is untested: EC writes stay disabled, CPU/GPU controls work"
+  else drow warn board "'$vendor $board' is not a Casper: EC writes disabled, CPU/GPU controls work"; fi
+
+  if [ -r "$EC_IO" ] || modinfo ec_sys >/dev/null 2>&1; then drow ok ec_sys "embedded controller interface present"
+  else drow MISSING ec_sys "kernel lacks CONFIG_ACPI_EC_DEBUGFS: boot the stock linux-generic kernel"; fi
+  lock="$(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/kernel/security/lockdown 2>/dev/null)"
+  case "$lock" in integrity|confidentiality)
+    drow warn lockdown "kernel lockdown '$lock' (Secure Boot) likely blocks EC writes and unsigned DKMS modules: disable Secure Boot in the BIOS";; esac
+
+  have iasl || { drow MISSING iasl "needed to decode the EC map"; pkgs="$pkgs acpica-tools"; }
+  have iasl && drow ok iasl "ACPI compiler present"
+  if [ -s "$FIELDS" ]; then drow ok ec_fields "$(wc -l < "$FIELDS") EC fields decoded"
+  else drow MISSING ec_fields "EC map not decoded yet"; fi
+
+  if have python3 && python3 -c 'import gi; gi.require_version("Gtk","3.0"); gi.require_version("Gdk","3.0")' 2>/dev/null
+  then drow ok gtk3 "casper-gui can start"
+  else drow MISSING gtk3 "python3-gi / GTK3 typelib (needed by casper-gui)"; pkgs="$pkgs python3 python3-gi gir1.2-gtk-3.0"; fi
+  if have pkexec; then drow ok pkexec "polkit present"
+  else pk=pkexec; apt-cache show pkexec >/dev/null 2>&1 || pk=policykit-1
+    drow MISSING pkexec "needed for the GUI password prompt"; pkgs="$pkgs $pk"; fi
+
+  if grep -qsi '^0x10de' /sys/bus/pci/devices/*/vendor; then
+    if have nvidia-smi && nvidia-smi -L >/dev/null 2>&1; then
+      drow ok nvidia "driver $(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
+    else drow MISSING nvidia "NVIDIA GPU found, no working driver (reboot first if you just installed one)"; gpu_bad=1; fi
+  else drow info nvidia "no NVIDIA GPU"; fi
+
+  if [ -d "$CPUF/intel_pstate" ]; then drow ok intel_pstate "turbo/EPP controls available"
+  else drow warn intel_pstate "not active: turbo control unavailable"; fi
+  if [ -d "$RAPL" ]; then drow ok rapl "CPU power limits available"
+  else drow warn rapl "powercap missing (try: sudo modprobe intel_rapl_msr)"; fi
+  [ -e /sys/firmware/acpi/platform_profile ] || drow info platform_prof "absent: expected, this laptop has no vendor platform driver"
+
+  if [ "$fix" != 1 ]; then
+    [ "$DOC_MISSING" = 0 ] || msg "
+Run 'sudo casper-ctl doctor --fix' to install what is missing."
+    [ "$DOC_MISSING" = 0 ]; return
+  fi
+
+  # ---- --fix ----
+  # shellcheck disable=SC2086
+  [ -z "$pkgs" ] || run apt-get install -y $pkgs
+  [ -d "$RAPL" ] || modprobe intel_rapl_msr 2>/dev/null
+  [ -s "$FIELDS" ] || { have iasl && ec_fields >/dev/null 2>&1; }
+  if [ "$gpu_bad" = 1 ]; then
+    have ubuntu-drivers || run apt-get install -y ubuntu-drivers-common
+    if [ -t 0 ]; then read -r -p "Install the recommended NVIDIA driver now (needs a reboot)? [y/N] " ans; else ans=n; fi
+    case "$ans" in y|Y) run ubuntu-drivers install && msg "NVIDIA driver installed: reboot, then run 'casper-ctl doctor'.";;
+      *) msg "Skipped NVIDIA. Later: sudo ubuntu-drivers install";; esac
+  fi
+  msg "
+== recheck"; doctor
+}
+
 usage() { cat <<'EOF'
 casper-ctl COMMAND [ARGS]
   env: DRY=1 print only; FORCE=1 lift safety limits; CASPER_SKIP_BOARD_CHECK=1 allow EC writes on other boards
 
  status                         show all readable state
+ doctor [--fix]                 detect missing drivers/packages; --fix installs them (apt)
  preset quiet|balanced|performance|max
  boot PRESET|none               apply preset (unless none) + restore saved keyboard state
  install-service [PRESET|none]  run 'boot' at every boot and resume (systemd)
@@ -505,6 +575,7 @@ dispatch() {
   local cmd="${1:-help}"; [ $# -gt 0 ] && shift
   case "$cmd" in
     status) status;;
+    doctor) doctor "${1:-}";;
     preset) preset "${1:-}";;
     boot) [ "${1:-none}" = none ] || try preset "$1"; restore;;
     install-service) install_service "${1:-none}";;
@@ -550,7 +621,7 @@ shell_mode() { # GUI helper: one command per stdin line, reply then "@@DONE <rc>
     [ -n "$line" ] || continue
     [ "$line" = quit ] && break
     case "$line" in
-      shell*|install-service*|acpi-call*|ec-watch*|*" watch"*) out="command not available in shell mode"; rc=2;;
+      shell*|install-service*|acpi-call*|ec-watch*|*" watch"*|*--fix*) out="command not available in shell mode"; rc=2;;
       *) # split the line without globbing, but keep globbing on for the commands themselves
          set -f; set -- $line; set +f   # shellcheck disable=SC2086
          out="$( (dispatch "$@") 2>&1 )"; rc=$?;;
